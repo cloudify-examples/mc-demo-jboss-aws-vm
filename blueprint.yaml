@@ -1,0 +1,137 @@
+tosca_definitions_version: cloudify_dsl_1_3
+
+description: >
+  See README.md file.
+
+imports:
+  - http://cloudify.co/spec/cloudify/5.0.0/types.yaml
+  - plugin:cloudify-aws-plugin
+
+inputs:
+  aws_config:
+    description: >
+      Parameters for connecting to AWS.
+    default:
+      aws_access_key_id: { get_secret: aws_default_access_key_id }
+      aws_secret_access_key: { get_secret: aws_default_secret_access_key }
+      ec2_region_name: { get_secret: aws_default_ec2_region_name }
+
+  vpc_id:
+    description: >
+      AWS ID of a pre-existing VPC to connect to.
+    type: string
+    default: { get_secret: aws_default_vpc_id }
+
+  resource_name_prefix:
+    description: >
+      Prefix to prepend to resource names.
+    type: string
+
+  image_id:
+    description: >
+      AMI ID of the image to use.
+    type: string
+    default: { get_secret: aws_default_linux_ami }
+
+  instance_type:
+    description: >
+      Type of instance to create.
+    type: string
+    default: t2.micro
+
+  keypair_name:
+    description: >
+      Name of keypair to associate new VM with.
+    type: string
+    default: { get_secret: aws_default_keypair_name }
+
+  ssh_user:
+    type: string
+    default: { get_secret: default_linux_agent_user }
+
+  private_key_path:
+    description: >
+      Path, on Cloudify Manager, for the private key used to SSH
+      to the VM for the purpose of installing the agent.
+    type: string
+    default: { get_secret: default_private_key_path }
+
+  subnet_cidr:
+    description: >
+      CIDR mask of the new subnet to create.
+    type: string
+
+node_templates:
+  vpc:
+    type: cloudify.aws.nodes.VPC
+    properties:
+      aws_config: { get_input: aws_config }
+      resource_id: { get_input: vpc_id }
+      cidr_block: ''
+      use_external_resource: true
+
+  subnet:
+    type: cloudify.aws.nodes.Subnet
+    properties:
+      aws_config: { get_input: aws_config }
+      resource_id: { concat: [ { get_input: resource_name_prefix }, 'subnet' ] }
+      cidr_block: { get_input: subnet_cidr }
+    relationships:
+      - target: vpc
+        type: cloudify.aws.relationships.subnet_contained_in_vpc
+
+  app_security_group:
+    type: cloudify.aws.nodes.SecurityGroup
+    properties:
+      aws_config: { get_input: aws_config }
+      description: Security Group for NodeJS application
+      resource_id: { concat: [ { get_input: resource_name_prefix }, '_securitygroup' ] }
+      rules:
+        - ip_protocol: tcp
+          from_port: 8080
+          to_port: 8080
+          cidr_ip: 0.0.0.0/0
+        - ip_protocol: tcp
+          from_port: 22
+          to_port: 22
+          cidr_ip: 0.0.0.0/0
+        - ip_protocol: tcp
+          from_port: 9990
+          to_port: 9990
+          cidr_ip: 0.0.0.0/0
+
+  elastic_ip:
+    type: cloudify.aws.nodes.ElasticIP
+    properties:
+      aws_config: { get_input: aws_config }
+
+  vm:
+    type: cloudify.aws.nodes.Instance
+    properties:
+      aws_config: { get_input: aws_config }
+      agent_config:
+        install_method: none
+      image_id: { get_input: image_id }
+      instance_type: { get_input: instance_type }
+      tags:
+        Name: { concat: [ { get_input: resource_name_prefix }, '_vm' ] }
+      os_family: linux
+      parameters:
+        key_name: { get_input: keypair_name }
+    relationships:
+      - type: cloudify.aws.relationships.instance_contained_in_subnet
+        target: subnet
+      - type: cloudify.aws.relationships.instance_connected_to_security_group
+        target: app_security_group
+      - type: cloudify.aws.relationships.instance_connected_to_elastic_ip
+        target: elastic_ip
+
+capabilities:
+  private_ip:
+    value: { get_attribute: [vm, ip] }
+  public_ip:
+    value: { get_attribute: [elastic_ip, aws_resource_id] }
+  ssh_user:
+    value: { get_input: ssh_user }
+  private_key_path:
+    value: { get_input: private_key_path }
